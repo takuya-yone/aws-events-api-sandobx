@@ -5,6 +5,8 @@ OAuth 2.0 認可コードフロー(PKCE)でサインインし、取得したア�
 セッション一覧を全件取得・JSON保存するスクリプトです。Node.js版とPython版があり、
 どちらも**外部ライブラリ不要**(標準ライブラリのみ)で動作します。
 
+Ref. https://docs.aws.amazon.com/events/latest/devguide/what-is-events-api.html
+
 ## プログラムのサマリ
 
 対象イベント(デフォルト `reinvent2026`)は登録制のため、匿名アクセスでは
