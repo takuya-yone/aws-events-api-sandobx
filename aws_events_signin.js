@@ -1,0 +1,255 @@
+#!/usr/bin/env node
+'use strict';
+
+/**
+ * AWS Events API - Builder ID サインイン (Authorization Code + PKCE)
+ *
+ * 使い方:
+ *   node aws-events-signin.js
+ *
+ * 実行すると:
+ *   1. PKCEパラメータを生成
+ *   2. ローカルの http://localhost:8484/callback でリダイレクトを待ち受け
+ *   3. 認可URLを表示（自動でブラウザも開こうとします）
+ *   4. Builder IDでサインインすると、このスクリプトがcodeを受け取り
+ *   5. 自動でアクセストークンに交換
+ *   6. ListSessions（GET /v1/events/{eventId}/sessions）を nextToken が
+ *      無くなるまでページネーションしながら全件取得し、JSONファイルに保存
+ *
+ * トークン取得後は、そのままListSessions（イベントのセッション一覧）を
+ * 全ページ取得してJSONファイルに保存します。
+ *
+ * 使い方（オプション）:
+ *   node aws-events-signin.js [eventId] [--no-abstracts] [--locale=ja-JP]
+ *
+ *   eventId         : 対象イベントID（省略時 reinvent2026）
+ *   --no-abstracts  : includeAbstracts=false を指定（abstractフィールドを省略、軽量化）
+ *   --locale=xx-XX  : localeクエリパラメータを指定
+ */
+
+const http = require('http');
+const https = require('https');
+const crypto = require('crypto');
+const fs = require('fs');
+const { exec } = require('child_process');
+
+const PORT = 8484;
+const CLIENT_ID = '7vmom55m1qstvq8i71ph127bfq';
+const REDIRECT_URI = `http://localhost:${PORT}/callback`;
+const AUTH_ENDPOINT = 'https://oauth.awsevents.com/oauth2/authorize';
+const TOKEN_ENDPOINT = 'https://oauth.awsevents.com/oauth2/token';
+const SCOPE = 'openid email events/access';
+const API_BASE = 'https://api.awsevents.com/v1';
+
+// ---- CLI引数のパース ----
+const cliArgs = process.argv.slice(2);
+const EVENT_ID = cliArgs.find((a) => !a.startsWith('--')) || 'reinvent2026';
+const INCLUDE_ABSTRACTS = !cliArgs.includes('--no-abstracts');
+const LOCALE = (cliArgs.find((a) => a.startsWith('--locale=')) || '').split('=')[1];
+
+// ---- PKCE生成 ----
+function base64url(buf) {
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+const codeVerifier = base64url(crypto.randomBytes(48)); // 43-128文字のunreserved文字列
+const codeChallenge = base64url(crypto.createHash('sha256').update(codeVerifier).digest());
+const state = crypto.randomBytes(16).toString('hex');
+
+// ---- 認可URLを組み立て ----
+const authUrl = new URL(AUTH_ENDPOINT);
+authUrl.searchParams.set('response_type', 'code');
+authUrl.searchParams.set('client_id', CLIENT_ID);
+authUrl.searchParams.set('redirect_uri', REDIRECT_URI);
+authUrl.searchParams.set('scope', SCOPE);
+authUrl.searchParams.set('identity_provider', 'AWSBuilderID');
+authUrl.searchParams.set('code_challenge', codeChallenge);
+authUrl.searchParams.set('code_challenge_method', 'S256');
+authUrl.searchParams.set('state', state);
+
+// ---- トークンエンドポイントへPOST ----
+function exchangeCodeForToken(code) {
+  return new Promise((resolve, reject) => {
+    const body = new URLSearchParams({
+      grant_type: 'authorization_code',
+      client_id: CLIENT_ID,
+      redirect_uri: REDIRECT_URI,
+      code,
+      code_verifier: codeVerifier,
+    }).toString();
+
+    const req = https.request(
+      TOKEN_ENDPOINT,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Content-Length': Buffer.byteLength(body),
+        },
+      },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk) => (data += chunk));
+        res.on('end', () => {
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            resolve(JSON.parse(data));
+          } else {
+            reject(new Error(`Token endpoint returned ${res.statusCode}: ${data}`));
+          }
+        });
+      }
+    );
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+// ---- 1ページ分のGETリクエスト ----
+function getJson(urlObj, accessToken) {
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      urlObj,
+      {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${accessToken}` },
+      },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk) => (data += chunk));
+        res.on('end', () => {
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            try {
+              resolve({ status: res.statusCode, body: JSON.parse(data) });
+            } catch (e) {
+              reject(new Error(`JSONパースに失敗: ${data}`));
+            }
+          } else {
+            reject(
+              Object.assign(new Error(`API returned ${res.statusCode}: ${data}`), {
+                status: res.statusCode,
+                body: data,
+              })
+            );
+          }
+        });
+      }
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+// ---- ListSessions: nextTokenが無くなるまで全ページ取得 ----
+// 注意: ページが短くても最後とは限らない。nextTokenが無いことだけが終了条件。
+async function fetchAllSessions(eventId, accessToken, { includeAbstracts = true, locale } = {}) {
+  const sessions = [];
+  let nextToken;
+  let totalCount;
+  let page = 0;
+
+  do {
+    const urlObj = new URL(`${API_BASE}/events/${encodeURIComponent(eventId)}/sessions`);
+    urlObj.searchParams.set('includeAbstracts', String(includeAbstracts));
+    if (locale) urlObj.searchParams.set('locale', locale);
+    if (nextToken) urlObj.searchParams.set('nextToken', nextToken);
+
+    const { body } = await getJson(urlObj, accessToken);
+    page += 1;
+    totalCount = body.totalCount ?? totalCount;
+    const pageSessions = body.items || [];
+    sessions.push(...pageSessions);
+    nextToken = body.nextToken;
+
+    console.log(`  ページ${page}: ${pageSessions.length}件取得（累計 ${sessions.length}${totalCount != null ? ` / ${totalCount}` : ''}）`);
+  } while (nextToken);
+
+  return { sessions, totalCount };
+}
+
+// ---- コールバック用ローカルサーバー ----
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, `http://localhost:${PORT}`);
+
+  if (url.pathname !== '/callback') {
+    res.writeHead(404);
+    res.end();
+    return;
+  }
+
+  const returnedState = url.searchParams.get('state');
+  const code = url.searchParams.get('code');
+  const error = url.searchParams.get('error');
+
+  if (error) {
+    res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end(`サインインに失敗しました: ${error}`);
+    console.error('認可エラー:', error, url.searchParams.get('error_description'));
+    server.close();
+    return;
+  }
+
+  if (returnedState !== state) {
+    res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('state が一致しません。CSRF対策のため処理を中断しました。');
+    console.error('state不一致: expected', state, 'got', returnedState);
+    server.close();
+    return;
+  }
+
+  res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+  res.end('サインインできました。このタブは閉じて構いません。');
+
+  try {
+    const tokens = await exchangeCodeForToken(code);
+    console.log('\n=== トークン取得成功 ===');
+    console.log('ACCESS_TOKEN :', tokens.access_token);
+    if (tokens.refresh_token) console.log('REFRESH_TOKEN:', tokens.refresh_token);
+    console.log('有効期限     :', tokens.expires_in, '秒');
+
+    console.log(`\n=== ${EVENT_ID} のセッション一覧を取得中 ===`);
+    try {
+      const { sessions, totalCount } = await fetchAllSessions(EVENT_ID, tokens.access_token, {
+        includeAbstracts: INCLUDE_ABSTRACTS,
+        locale: LOCALE,
+      });
+
+      console.log(`\n取得完了: ${sessions.length}件${totalCount != null ? `（catalog上のtotalCount: ${totalCount}）` : ''}`);
+
+      const outFile = `sessions-${EVENT_ID}.json`;
+      fs.writeFileSync(outFile, JSON.stringify(sessions, null, 2), 'utf-8');
+      console.log(`保存先: ${outFile}`);
+
+      console.log('\n--- 先頭5件のタイトル ---');
+      sessions.slice(0, 5).forEach((s) => {
+        console.log(`- [${s.sessionId ?? '?'}] ${s.title ?? '(タイトルなし)'}`);
+      });
+    } catch (e) {
+      if (e.status === 401) {
+        console.error('セッション取得に失敗（401）: トークンが無効です。');
+      } else if (e.status === 403) {
+        console.error(
+          `セッション取得に失敗（403）: このイベント（${EVENT_ID}）に登録されていない可能性があります。イベントの登録サイトで登録してから再実行してください。`
+        );
+      } else {
+        console.error('セッション取得に失敗しました:', e.message);
+      }
+    }
+  } catch (e) {
+    console.error('トークン交換に失敗しました:', e.message);
+  } finally {
+    server.close();
+  }
+});
+
+server.listen(PORT, () => {
+  console.log(`ローカルサーバーを起動しました: ${REDIRECT_URI}`);
+  console.log('\n以下のURLをブラウザで開いてBuilder IDでサインインしてください:\n');
+  console.log(authUrl.toString());
+  console.log('');
+
+  // 可能なら自動でブラウザを開く（失敗しても無視）
+  const opener =
+    process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
+  exec(`${opener} "${authUrl.toString()}"`, () => {});
+});
