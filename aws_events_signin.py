@@ -240,10 +240,17 @@ def session_to_markdown(session: dict) -> str:
     topics = _names(_first(session, "topics"))
     if topics:
         meta.append(f"トピック: {', '.join(topics)}")
-    start = _first(session, "startDateTime", "startTime")
-    end = _first(session, "endDateTime", "endTime")
-    if start or end:
-        meta.append(f"時間: {start or '?'} 〜 {end or '?'}")
+    services = _names(_first(session, "services"))
+    if services:
+        meta.append(f"サービス: {', '.join(services)}")
+    session_time = _first(session, "sessionTime")
+    if session_time:
+        meta.append(f"セッション時間: {session_time}")
+    else:
+        start = _first(session, "startDateTime", "startTime")
+        end = _first(session, "endDateTime", "endTime")
+        if start or end:
+            meta.append(f"時間: {start or '?'} 〜 {end or '?'}")
     place = ", ".join(filter(None, [session.get("venue"), session.get("room")]))
     if place:
         meta.append(f"場所: {place}")

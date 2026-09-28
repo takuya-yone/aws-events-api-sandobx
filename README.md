@@ -24,8 +24,8 @@ Ref. https://docs.aws.amazon.com/events/latest/devguide/what-is-events-api.html
 `--md` を指定すると、JSON保存に加えて `sessions-<eventId>-md/` ディレクトリに
 セッションごとのMarkdownファイルも保存します。ファイル名はレスポンス内の
 `abbreviation` フィールド(無ければ `sessionId`、それも無ければ連番)を使います。
-各ファイルには略称・タイトル・コード・トラック・トピック・時間・場所・スピーカー・
-abstractを整形して出力します。
+各ファイルには略称・タイトル・コード・トラック・トピック・サービス・セッション時間
+(`sessionTime`。無ければ開始/終了時刻)・場所・スピーカー・abstractを整形して出力します。
 
 `--reserve=id1,id2,...` を指定した場合は、6〜7の代わりに
 `POST /v1/events/{eventId}/reservations`
@@ -138,12 +138,13 @@ Node.js版と同一です(表示メッセージも日本語で揃えてありま
 参照箇所)は実際のキー名に合わせて修正してください。
 
 `--md` のMarkdown出力(`session_to_markdown` / `sessionToMarkdown`)が参照する
-セッションの各フィールド名(`code`、`sessionType`、`tracks`、`topics`、
-`startDateTime`、`endDateTime`、`room`、`venue`、`speakers` など)も、
+セッションの各フィールド名(`code`、`sessionType`、`tracks`、`topics`、`services`、
+`sessionTime`、`startDateTime`、`endDateTime`、`room`、`venue`、`speakers` など)も、
 AWSドキュメントには存在するフィールドの説明のみで正確なJSONキー名の記載がないため
 推測です。イベントが実際に提供しないフィールドはMarkdown上で自動的に省略されるため
 実害はありませんが、キー名が異なる場合は該当箇所を実際のレスポンスに合わせて
-修正してください。
+修正してください。`sessionTime` が存在する場合はそちらを優先して表示し、無い場合のみ
+`startDateTime`/`endDateTime`(またはその別名)から時間を組み立てます。
 
 なお、ファイル名に使う `abbreviation` フィールドもドキュメント上に明記が見当たらないため
 推測です。存在しない場合は `sessionId` に、それも無い場合は `unknown-<インデックス>` に

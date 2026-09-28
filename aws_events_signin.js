@@ -269,9 +269,15 @@ function sessionToMarkdown(session) {
   if (tracks.length) meta.push(`トラック: ${tracks.join(', ')}`);
   const topics = names(session.topics);
   if (topics.length) meta.push(`トピック: ${topics.join(', ')}`);
-  const start = first(session, 'startDateTime', 'startTime');
-  const end = first(session, 'endDateTime', 'endTime');
-  if (start || end) meta.push(`時間: ${start ?? '?'} 〜 ${end ?? '?'}`);
+  const services = names(session.services);
+  if (services.length) meta.push(`サービス: ${services.join(', ')}`);
+  if (session.sessionTime) {
+    meta.push(`セッション時間: ${session.sessionTime}`);
+  } else {
+    const start = first(session, 'startDateTime', 'startTime');
+    const end = first(session, 'endDateTime', 'endTime');
+    if (start || end) meta.push(`時間: ${start ?? '?'} 〜 ${end ?? '?'}`);
+  }
   const place = [session.venue, session.room].filter(Boolean).join(', ');
   if (place) meta.push(`場所: ${place}`);
   const speakers = names(session.speakers);
