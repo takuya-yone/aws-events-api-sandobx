@@ -18,6 +18,9 @@ AWS Events API - Builder ID サインイン (Authorization Code + PKCE)
     eventId         : 対象イベントID（省略時 reinvent2026）
     --no-abstracts  : includeAbstracts=false を指定（abstractフィールドを省略、軽量化）
     --locale=xx-XX  : localeクエリパラメータを指定
+    --reserve=id1,id2,...
+                    : セッション一覧取得の代わりに、指定したセッションID（1〜10件、重複不可）を
+                      予約する（ReserveSessions: POST /v1/events/{eventId}/reservations）
 """
 
 import base64
@@ -45,6 +48,18 @@ EVENT_ID = next((a for a in _cli_args if not a.startswith("--")), "reinvent2026"
 INCLUDE_ABSTRACTS = "--no-abstracts" not in _cli_args
 _locale_arg = next((a for a in _cli_args if a.startswith("--locale=")), None)
 LOCALE = _locale_arg.split("=", 1)[1] if _locale_arg else None
+_reserve_arg = next((a for a in _cli_args if a.startswith("--reserve=")), None)
+RESERVE_SESSION_IDS = (
+    [s for s in _reserve_arg.split("=", 1)[1].split(",") if s] if _reserve_arg else None
+)
+
+if RESERVE_SESSION_IDS is not None:
+    if not (1 <= len(RESERVE_SESSION_IDS) <= 10):
+        print("エラー: --reserve には1〜10件のセッションIDを指定してください（例: --reserve=id1,id2）", file=sys.stderr)
+        sys.exit(1)
+    if len(set(RESERVE_SESSION_IDS)) != len(RESERVE_SESSION_IDS):
+        print("エラー: --reserve のセッションIDは重複できません。", file=sys.stderr)
+        sys.exit(1)
 
 
 def b64url(data: bytes) -> str:
@@ -115,6 +130,30 @@ def get_json(url: str, access_token: str) -> dict:
             return json.loads(data)
     except urllib.error.HTTPError as e:
         raise ApiError(e.code, e.read().decode("utf-8"))
+
+
+def post_json(url: str, access_token: str, payload: dict) -> dict:
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise ApiError(e.code, e.read().decode("utf-8"))
+
+
+# ---- ReserveSessions: 指定したセッションIDを予約 ----
+def reserve_sessions(event_id: str, access_token: str, session_ids: list) -> dict:
+    url = f"{API_BASE}/events/{urllib.parse.quote(event_id, safe='')}/reservations"
+    return post_json(url, access_token, {"sessionIds": session_ids})
 
 
 # ---- ListSessions: nextTokenが無くなるまで全ページ取得 ----
@@ -221,6 +260,44 @@ def main():
     if tokens.get("refresh_token"):
         print("REFRESH_TOKEN:", tokens.get("refresh_token"))
     print("有効期限     :", tokens.get("expires_in"), "秒")
+
+    if RESERVE_SESSION_IDS is not None:
+        print(f"\n=== {EVENT_ID} のセッションを予約中: {', '.join(RESERVE_SESSION_IDS)} ===")
+        try:
+            result = reserve_sessions(EVENT_ID, tokens.get("access_token"), RESERVE_SESSION_IDS)
+
+            print("\n=== 予約結果 ===")
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            # 注意: succeeded/failed のキー名は実APIで要確認（ListSessionsのitemsと同様の前提）
+            succeeded = result.get("succeeded") or []
+            failed = result.get("failed") or []
+            if succeeded:
+                print(f"\n成功: {len(succeeded)}件")
+            if failed:
+                print(f"失敗: {len(failed)}件（理由は上記JSONを参照。未知の理由コードは「拒否」として扱ってください）")
+
+            out_file = f"reservation-{EVENT_ID}.json"
+            with open(out_file, "w", encoding="utf-8") as f:
+                json.dump(result, f, ensure_ascii=False, indent=2)
+            print(f"保存先: {out_file}")
+
+        except ApiError as e:
+            if e.status == 401:
+                print("予約に失敗（401）: トークンが無効です。", file=sys.stderr)
+            elif e.status == 403:
+                print(
+                    f"予約に失敗（403）: このイベント（{EVENT_ID}）に登録されていない可能性があります。"
+                    "イベントの登録サイトで登録してから再実行してください。",
+                    file=sys.stderr,
+                )
+            elif e.status == 400:
+                print(
+                    f"予約に失敗（400）: リクエスト内容を確認してください（セッションIDは1〜10件・重複不可）: {e.body}",
+                    file=sys.stderr,
+                )
+            else:
+                print("予約に失敗しました:", e, file=sys.stderr)
+        return
 
     print(f"\n=== {EVENT_ID} のセッション一覧を取得中 ===")
     try:

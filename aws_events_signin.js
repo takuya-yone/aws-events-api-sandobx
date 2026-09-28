@@ -25,6 +25,9 @@
  *   eventId         : 対象イベントID（省略時 reinvent2026）
  *   --no-abstracts  : includeAbstracts=false を指定（abstractフィールドを省略、軽量化）
  *   --locale=xx-XX  : localeクエリパラメータを指定
+ *   --reserve=id1,id2,...
+ *                   : セッション一覧取得の代わりに、指定したセッションID（1〜10件、重複不可）を
+ *                     予約する（ReserveSessions: POST /v1/events/{eventId}/reservations）
  */
 
 const http = require('http');
@@ -46,6 +49,21 @@ const cliArgs = process.argv.slice(2);
 const EVENT_ID = cliArgs.find((a) => !a.startsWith('--')) || 'reinvent2026';
 const INCLUDE_ABSTRACTS = !cliArgs.includes('--no-abstracts');
 const LOCALE = (cliArgs.find((a) => a.startsWith('--locale=')) || '').split('=')[1];
+const reserveArg = cliArgs.find((a) => a.startsWith('--reserve='));
+const RESERVE_SESSION_IDS = reserveArg
+  ? reserveArg.slice('--reserve='.length).split(',').filter(Boolean)
+  : null;
+
+if (RESERVE_SESSION_IDS) {
+  if (RESERVE_SESSION_IDS.length < 1 || RESERVE_SESSION_IDS.length > 10) {
+    console.error('エラー: --reserve には1〜10件のセッションIDを指定してください（例: --reserve=id1,id2）');
+    process.exit(1);
+  }
+  if (new Set(RESERVE_SESSION_IDS).size !== RESERVE_SESSION_IDS.length) {
+    console.error('エラー: --reserve のセッションIDは重複できません。');
+    process.exit(1);
+  }
+}
 
 // ---- PKCE生成 ----
 function base64url(buf) {
@@ -140,6 +158,54 @@ function getJson(urlObj, accessToken) {
   });
 }
 
+// ---- POST（JSONボディ）リクエスト ----
+function postJson(urlObj, accessToken, payload) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(payload);
+    const req = https.request(
+      urlObj,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+        },
+      },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk) => (data += chunk));
+        res.on('end', () => {
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            try {
+              resolve({ status: res.statusCode, body: JSON.parse(data) });
+            } catch (e) {
+              reject(new Error(`JSONパースに失敗: ${data}`));
+            }
+          } else {
+            reject(
+              Object.assign(new Error(`API returned ${res.statusCode}: ${data}`), {
+                status: res.statusCode,
+                body: data,
+              })
+            );
+          }
+        });
+      }
+    );
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+// ---- ReserveSessions: 指定したセッションIDを予約 ----
+async function reserveSessions(eventId, accessToken, sessionIds) {
+  const urlObj = new URL(`${API_BASE}/events/${encodeURIComponent(eventId)}/reservations`);
+  const { body } = await postJson(urlObj, accessToken, { sessionIds });
+  return body;
+}
+
 // ---- ListSessions: nextTokenが無くなるまで全ページ取得 ----
 // 注意: ページが短くても最後とは限らない。nextTokenが無いことだけが終了条件。
 async function fetchAllSessions(eventId, accessToken, { includeAbstracts = true, locale } = {}) {
@@ -206,6 +272,42 @@ const server = http.createServer(async (req, res) => {
     console.log('ACCESS_TOKEN :', tokens.access_token);
     if (tokens.refresh_token) console.log('REFRESH_TOKEN:', tokens.refresh_token);
     console.log('有効期限     :', tokens.expires_in, '秒');
+
+    if (RESERVE_SESSION_IDS) {
+      console.log(`\n=== ${EVENT_ID} のセッションを予約中: ${RESERVE_SESSION_IDS.join(', ')} ===`);
+      try {
+        const result = await reserveSessions(EVENT_ID, tokens.access_token, RESERVE_SESSION_IDS);
+
+        console.log('\n=== 予約結果 ===');
+        console.log(JSON.stringify(result, null, 2));
+        // 注意: succeeded/failed のキー名は実APIで要確認（ListSessionsのitemsと同様の前提）
+        const succeeded = result.succeeded || [];
+        const failed = result.failed || [];
+        if (succeeded.length) console.log(`\n成功: ${succeeded.length}件`);
+        if (failed.length) {
+          console.log(`失敗: ${failed.length}件（理由は上記JSONを参照。未知の理由コードは「拒否」として扱ってください）`);
+        }
+
+        const outFile = `reservation-${EVENT_ID}.json`;
+        fs.writeFileSync(outFile, JSON.stringify(result, null, 2), 'utf-8');
+        console.log(`保存先: ${outFile}`);
+      } catch (e) {
+        if (e.status === 401) {
+          console.error('予約に失敗（401）: トークンが無効です。');
+        } else if (e.status === 403) {
+          console.error(
+            `予約に失敗（403）: このイベント（${EVENT_ID}）に登録されていない可能性があります。イベントの登録サイトで登録してから再実行してください。`
+          );
+        } else if (e.status === 400) {
+          console.error(
+            `予約に失敗（400）: リクエスト内容を確認してください（セッションIDは1〜10件・重複不可）: ${e.body}`
+          );
+        } else {
+          console.error('予約に失敗しました:', e.message);
+        }
+      }
+      return;
+    }
 
     console.log(`\n=== ${EVENT_ID} のセッション一覧を取得中 ===`);
     try {

@@ -21,6 +21,15 @@ Ref. https://docs.aws.amazon.com/events/latest/devguide/what-is-events-api.html
    `nextToken` が無くなるまでページネーションして全件取得
 7. 取得結果を `sessions-<eventId>.json` に保存し、先頭5件のタイトルを表示
 
+`--reserve=id1,id2,...` を指定した場合は、6〜7の代わりに
+`POST /v1/events/{eventId}/reservations`
+([ReserveSessions](https://docs.aws.amazon.com/events/latest/devguide/rest-op-reservesessions.html))
+を呼び出し、指定したセッション(1〜10件、重複不可)を予約します。結果は
+`reservation-<eventId>.json` に保存されます。レスポンスは成功/失敗をセッションごとに
+返し、`200` でも一部が失敗している場合があるため、常に失敗内容を確認してください
+(すでに予約済みのセッションも失敗として扱われるため、同じリクエストの再送は安全な
+リトライにはなりません)。
+
 ### 主なオプション(Node版・Python版共通)
 
 | オプション | 説明 |
@@ -28,6 +37,7 @@ Ref. https://docs.aws.amazon.com/events/latest/devguide/what-is-events-api.html
 | `eventId`(第1引数) | 対象イベントID。省略時は `reinvent2026` |
 | `--no-abstracts` | `includeAbstracts=false` を指定し、abstractフィールドを省略して軽量化 |
 | `--locale=xx-XX` | `locale` クエリパラメータを指定(例: `--locale=ja-JP`) |
+| `--reserve=id1,id2,...` | セッション一覧取得の代わりに、指定したセッションID(1〜10件、重複不可)を予約 |
 
 ### エラー時の挙動
 
@@ -113,3 +123,9 @@ Node.js版と同一です(表示メッセージも日本語で揃えてありま
 ドキュメント上に明記が見当たらなかったため、実際にAPIを一度叩いて確認することを
 推奨します。異なっていた場合は、両スクリプトの `fetchAllSessions` /
 `fetch_all_sessions` 内の該当箇所を実際のキー名に合わせて修正してください。
+
+同様に `ReserveSessions` のレスポンスにある成功/失敗一覧のキー名(`succeeded` /
+`failed` 等)もドキュメント上に明記がないため仮の名前で実装しています。両スクリプトは
+レスポンス全体をそのまま表示・保存するので実害はありませんが、成功/失敗件数の
+サマリ表示部分(`reserveSessions` 呼び出し後の `result.succeeded` / `result.failed`
+参照箇所)は実際のキー名に合わせて修正してください。
