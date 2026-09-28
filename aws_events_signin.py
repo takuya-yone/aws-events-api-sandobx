@@ -21,12 +21,16 @@ AWS Events API - Builder ID サインイン (Authorization Code + PKCE)
     --reserve=id1,id2,...
                     : セッション一覧取得の代わりに、指定したセッションID（1〜10件、重複不可）を
                       予約する（ReserveSessions: POST /v1/events/{eventId}/reservations）
+    --md            : セッション一覧取得時、JSONに加えて sessions-<eventId>-md/ 配下に
+                      セッションIDごとの Markdown ファイル（<sessionId>.md）も保存する
 """
 
 import base64
 import hashlib
 import http.server
 import json
+import os
+import re
 import secrets
 import sys
 import urllib.error
@@ -52,6 +56,7 @@ _reserve_arg = next((a for a in _cli_args if a.startswith("--reserve=")), None)
 RESERVE_SESSION_IDS = (
     [s for s in _reserve_arg.split("=", 1)[1].split(",") if s] if _reserve_arg else None
 )
+MD_OUTPUT = "--md" in _cli_args
 
 if RESERVE_SESSION_IDS is not None:
     if not (1 <= len(RESERVE_SESSION_IDS) <= 10):
@@ -190,6 +195,89 @@ def fetch_all_sessions(event_id: str, access_token: str, include_abstracts: bool
     return sessions, total_count
 
 
+# ---- セッション一覧をMarkdownに整形 ----
+# 注意: 各フィールドのキー名はドキュメント上に明記が見当たらないため推測。
+# イベントが実際に提供しないフィールドは省略して表示する。
+def _first(session: dict, *keys):
+    for k in keys:
+        v = session.get(k)
+        if v:
+            return v
+    return None
+
+
+def _names(items) -> list:
+    names = []
+    for item in items or []:
+        if isinstance(item, dict):
+            name = item.get("name")
+            if name:
+                names.append(name)
+        elif isinstance(item, str):
+            names.append(item)
+    return names
+
+
+def session_to_markdown(session: dict) -> str:
+    session_id = session.get("sessionId", "?")
+    title = session.get("title") or "(タイトルなし)"
+    lines = [f"# [{session_id}] {title}", ""]
+
+    meta = []
+    if session.get("abbreviation"):
+        meta.append(f"略称: {session['abbreviation']}")
+    code = _first(session, "code", "sessionCode")
+    if code:
+        meta.append(f"コード: {code}")
+    session_type = _first(session, "sessionType", "type")
+    if session_type:
+        meta.append(f"タイプ: {session_type}")
+    if session.get("level"):
+        meta.append(f"レベル: {session['level']}")
+    tracks = _names(_first(session, "tracks"))
+    if tracks:
+        meta.append(f"トラック: {', '.join(tracks)}")
+    topics = _names(_first(session, "topics"))
+    if topics:
+        meta.append(f"トピック: {', '.join(topics)}")
+    start = _first(session, "startDateTime", "startTime")
+    end = _first(session, "endDateTime", "endTime")
+    if start or end:
+        meta.append(f"時間: {start or '?'} 〜 {end or '?'}")
+    place = ", ".join(filter(None, [session.get("venue"), session.get("room")]))
+    if place:
+        meta.append(f"場所: {place}")
+    speakers = _names(_first(session, "speakers"))
+    if speakers:
+        meta.append(f"スピーカー: {', '.join(speakers)}")
+
+    for m in meta:
+        lines.append(f"- {m}")
+    if meta:
+        lines.append("")
+
+    if session.get("abstract"):
+        lines.append(session["abstract"])
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
+
+
+def save_sessions_as_markdown(event_id: str, sessions: list) -> str:
+    md_dir = f"sessions-{event_id}-md"
+    os.makedirs(md_dir, exist_ok=True)
+    for i, s in enumerate(sessions):
+        # ファイル名は abbreviation を優先。無ければ sessionId、それも無ければ連番。
+        file_id = s.get("abbreviation") or s.get("sessionId") or f"unknown-{i}"
+        safe_id = _UNSAFE_FILENAME_CHARS.sub("_", str(file_id))
+        with open(os.path.join(md_dir, f"{safe_id}.md"), "w", encoding="utf-8") as f:
+            f.write(session_to_markdown(s))
+    return md_dir
+
+
 # ---- コールバック用ローカルサーバー ----
 class CallbackHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -312,6 +400,10 @@ def main():
         with open(out_file, "w", encoding="utf-8") as f:
             json.dump(sessions, f, ensure_ascii=False, indent=2)
         print(f"保存先: {out_file}")
+
+        if MD_OUTPUT:
+            md_dir = save_sessions_as_markdown(EVENT_ID, sessions)
+            print(f"保存先(Markdown): {md_dir}/ 配下に{len(sessions)}件")
 
         print("\n--- 先頭5件のタイトル ---")
         for s in sessions[:5]:

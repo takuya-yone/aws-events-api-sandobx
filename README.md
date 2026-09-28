@@ -21,6 +21,12 @@ Ref. https://docs.aws.amazon.com/events/latest/devguide/what-is-events-api.html
    `nextToken` が無くなるまでページネーションして全件取得
 7. 取得結果を `sessions-<eventId>.json` に保存し、先頭5件のタイトルを表示
 
+`--md` を指定すると、JSON保存に加えて `sessions-<eventId>-md/` ディレクトリに
+セッションごとのMarkdownファイルも保存します。ファイル名はレスポンス内の
+`abbreviation` フィールド(無ければ `sessionId`、それも無ければ連番)を使います。
+各ファイルには略称・タイトル・コード・トラック・トピック・時間・場所・スピーカー・
+abstractを整形して出力します。
+
 `--reserve=id1,id2,...` を指定した場合は、6〜7の代わりに
 `POST /v1/events/{eventId}/reservations`
 ([ReserveSessions](https://docs.aws.amazon.com/events/latest/devguide/rest-op-reservesessions.html))
@@ -37,6 +43,7 @@ Ref. https://docs.aws.amazon.com/events/latest/devguide/what-is-events-api.html
 | `eventId`(第1引数) | 対象イベントID。省略時は `reinvent2026` |
 | `--no-abstracts` | `includeAbstracts=false` を指定し、abstractフィールドを省略して軽量化 |
 | `--locale=xx-XX` | `locale` クエリパラメータを指定(例: `--locale=ja-JP`) |
+| `--md` | セッション一覧取得時、JSONに加えて `sessions-<eventId>-md/` にセッションIDごとのMarkdownも保存 |
 | `--reserve=id1,id2,...` | セッション一覧取得の代わりに、指定したセッションID(1〜10件、重複不可)を予約 |
 
 ### エラー時の挙動
@@ -129,3 +136,15 @@ Node.js版と同一です(表示メッセージも日本語で揃えてありま
 レスポンス全体をそのまま表示・保存するので実害はありませんが、成功/失敗件数の
 サマリ表示部分(`reserveSessions` 呼び出し後の `result.succeeded` / `result.failed`
 参照箇所)は実際のキー名に合わせて修正してください。
+
+`--md` のMarkdown出力(`session_to_markdown` / `sessionToMarkdown`)が参照する
+セッションの各フィールド名(`code`、`sessionType`、`tracks`、`topics`、
+`startDateTime`、`endDateTime`、`room`、`venue`、`speakers` など)も、
+AWSドキュメントには存在するフィールドの説明のみで正確なJSONキー名の記載がないため
+推測です。イベントが実際に提供しないフィールドはMarkdown上で自動的に省略されるため
+実害はありませんが、キー名が異なる場合は該当箇所を実際のレスポンスに合わせて
+修正してください。
+
+なお、ファイル名に使う `abbreviation` フィールドもドキュメント上に明記が見当たらないため
+推測です。存在しない場合は `sessionId` に、それも無い場合は `unknown-<インデックス>` に
+フォールバックするため、複数件あっても上書きされません。

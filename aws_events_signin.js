@@ -28,12 +28,15 @@
  *   --reserve=id1,id2,...
  *                   : セッション一覧取得の代わりに、指定したセッションID（1〜10件、重複不可）を
  *                     予約する（ReserveSessions: POST /v1/events/{eventId}/reservations）
+ *   --md            : セッション一覧取得時、JSONに加えて sessions-<eventId>-md/ 配下に
+ *                     セッションIDごとの Markdown ファイル（<sessionId>.md）も保存する
  */
 
 const http = require('http');
 const https = require('https');
 const crypto = require('crypto');
 const fs = require('fs');
+const path = require('path');
 const { exec } = require('child_process');
 
 const PORT = 8484;
@@ -64,6 +67,7 @@ if (RESERVE_SESSION_IDS) {
     process.exit(1);
   }
 }
+const MD_OUTPUT = cliArgs.includes('--md');
 
 // ---- PKCE生成 ----
 function base64url(buf) {
@@ -233,6 +237,71 @@ async function fetchAllSessions(eventId, accessToken, { includeAbstracts = true,
   return { sessions, totalCount };
 }
 
+// ---- セッション一覧をMarkdownに整形 ----
+// 注意: 各フィールドのキー名はドキュメント上に明記が見当たらないため推測。
+// イベントが実際に提供しないフィールドは省略して表示する。
+function first(session, ...keys) {
+  for (const k of keys) {
+    if (session[k]) return session[k];
+  }
+  return undefined;
+}
+
+function names(items) {
+  return (items || [])
+    .map((item) => (typeof item === 'string' ? item : item?.name))
+    .filter(Boolean);
+}
+
+function sessionToMarkdown(session) {
+  const sessionId = session.sessionId ?? '?';
+  const title = session.title || '(タイトルなし)';
+  const lines = [`# [${sessionId}] ${title}`, ''];
+
+  const meta = [];
+  if (session.abbreviation) meta.push(`略称: ${session.abbreviation}`);
+  const code = first(session, 'code', 'sessionCode');
+  if (code) meta.push(`コード: ${code}`);
+  const sessionType = first(session, 'sessionType', 'type');
+  if (sessionType) meta.push(`タイプ: ${sessionType}`);
+  if (session.level) meta.push(`レベル: ${session.level}`);
+  const tracks = names(session.tracks);
+  if (tracks.length) meta.push(`トラック: ${tracks.join(', ')}`);
+  const topics = names(session.topics);
+  if (topics.length) meta.push(`トピック: ${topics.join(', ')}`);
+  const start = first(session, 'startDateTime', 'startTime');
+  const end = first(session, 'endDateTime', 'endTime');
+  if (start || end) meta.push(`時間: ${start ?? '?'} 〜 ${end ?? '?'}`);
+  const place = [session.venue, session.room].filter(Boolean).join(', ');
+  if (place) meta.push(`場所: ${place}`);
+  const speakers = names(session.speakers);
+  if (speakers.length) meta.push(`スピーカー: ${speakers.join(', ')}`);
+
+  meta.forEach((m) => lines.push(`- ${m}`));
+  if (meta.length) lines.push('');
+
+  if (session.abstract) {
+    lines.push(session.abstract);
+    lines.push('');
+  }
+
+  return lines.join('\n');
+}
+
+const UNSAFE_FILENAME_CHARS = /[^A-Za-z0-9_.-]/g;
+
+function saveSessionsAsMarkdown(eventId, sessions) {
+  const mdDir = `sessions-${eventId}-md`;
+  fs.mkdirSync(mdDir, { recursive: true });
+  sessions.forEach((s, i) => {
+    // ファイル名は abbreviation を優先。無ければ sessionId、それも無ければ連番。
+    const fileId = s.abbreviation || s.sessionId || `unknown-${i}`;
+    const safeId = String(fileId).replace(UNSAFE_FILENAME_CHARS, '_');
+    fs.writeFileSync(path.join(mdDir, `${safeId}.md`), sessionToMarkdown(s), 'utf-8');
+  });
+  return mdDir;
+}
+
 // ---- コールバック用ローカルサーバー ----
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
@@ -321,6 +390,11 @@ const server = http.createServer(async (req, res) => {
       const outFile = `sessions-${EVENT_ID}.json`;
       fs.writeFileSync(outFile, JSON.stringify(sessions, null, 2), 'utf-8');
       console.log(`保存先: ${outFile}`);
+
+      if (MD_OUTPUT) {
+        const mdDir = saveSessionsAsMarkdown(EVENT_ID, sessions);
+        console.log(`保存先(Markdown): ${mdDir}/ 配下に${sessions.length}件`);
+      }
 
       console.log('\n--- 先頭5件のタイトル ---');
       sessions.slice(0, 5).forEach((s) => {

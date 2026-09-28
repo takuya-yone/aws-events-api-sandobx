@@ -12,18 +12,19 @@ Reference: https://docs.aws.amazon.com/events/latest/devguide/what-is-events-api
 
 ```bash
 # Python (3.x, stdlib only)
-python3 aws_events_signin.py [eventId] [--no-abstracts] [--locale=ja-JP] [--reserve=id1,id2]
+python3 aws_events_signin.py [eventId] [--no-abstracts] [--locale=ja-JP] [--md] [--reserve=id1,id2]
 
 # Node.js (stdlib only, v18+ recommended)
-node aws_events_signin.js [eventId] [--no-abstracts] [--locale=ja-JP] [--reserve=id1,id2]
+node aws_events_signin.js [eventId] [--no-abstracts] [--locale=ja-JP] [--md] [--reserve=id1,id2]
 ```
 
 - `eventId` (positional, default `reinvent2026`): target event.
 - `--no-abstracts`: sends `includeAbstracts=false` to shrink the response.
 - `--locale=xx-XX`: sets the `locale` query param.
-- `--reserve=id1,id2,...`: instead of listing sessions, calls `ReserveSessions` (`POST /v1/events/{eventId}/reservations`) to reserve 1–10 distinct session IDs. Mutually exclusive with the listing flow — when set, listing is skipped entirely.
+- `--md`: listing path only — in addition to the JSON file, renders each session as its own human-readable Markdown file under `sessions-<eventId>-md/`, via `save_sessions_as_markdown` / `saveSessionsAsMarkdown` (which call `session_to_markdown` / `sessionToMarkdown` per session). Filename is `<abbreviation>.md`, falling back to `<sessionId>.md` then `unknown-<index>.md`.
+- `--reserve=id1,id2,...`: instead of listing sessions, calls `ReserveSessions` (`POST /v1/events/{eventId}/reservations`) to reserve 1–10 distinct session IDs. Mutually exclusive with the listing flow (and thus with `--md`) — when set, listing is skipped entirely.
 
-Both scripts require a real browser-based Builder ID sign-in during execution — there is no automated/headless test path. Output is written to `sessions-<eventId>.json` (listing) or `reservation-<eventId>.json` (`--reserve`) in the current directory.
+Both scripts require a real browser-based Builder ID sign-in during execution — there is no automated/headless test path. Output is written to `sessions-<eventId>.json` (+ optional `sessions-<eventId>-md/` directory) for listing, or `reservation-<eventId>.json` for `--reserve`, in the current directory.
 
 ## Architecture (same shape in both languages)
 
@@ -36,7 +37,7 @@ Each script is a single self-contained flow with no external modules:
 5. **Branch on `--reserve`**:
    - If set: **`reserve_sessions` / `reserveSessions`** POSTs `{"sessionIds": [...]}` to `/v1/events/{eventId}/reservations`, prints the raw response, and saves it to `reservation-<eventId>.json`. A `200` does not mean every ID succeeded — the API reports success/failure per session, and an already-reserved session counts as a failure, so this call is not safely retryable by re-sending the same IDs.
    - Otherwise: **Pagination loop (`fetch_all_sessions` / `fetchAllSessions`)** — calls `GET /v1/events/{eventId}/sessions` repeatedly, following `nextToken` until absent. Termination is driven *only* by the absence of `nextToken`, not by page size — a short page is not necessarily the last one.
-6. **Save + summary** — writes the full session array to `sessions-<eventId>.json` and prints the first 5 titles (listing path only; the reserve path saves under its own filename, see above).
+6. **Save + summary** (listing path only) — writes the full session array to `sessions-<eventId>.json`, optionally renders one Markdown file per session under `sessions-<eventId>-md/` when `--md` is set (filenames prefer `abbreviation`, fall back to `sessionId`, then `unknown-<index>`, with unsafe characters replaced, so entries never collide), and prints the first 5 titles. The reserve path saves under its own filename, see above.
 
 Key constants at the top of each file (`CLIENT_ID`, `PORT`, `AUTH_ENDPOINT`, `TOKEN_ENDPOINT`, `API_BASE`, `SCOPE`) are duplicated across both scripts — when changing one (e.g. rotating the port or client ID), update both files to keep them in sync.
 
@@ -51,3 +52,4 @@ Key constants at the top of each file (`CLIENT_ID`, `PORT`, `AUTH_ENDPOINT`, `TO
 
 - The actual key name for the sessions array in the `ListSessions` response (`items` vs `sessions`, etc.) isn't confirmed in AWS docs. Both scripts currently read `body.items` / `body.get("items")`. If a real API call shows a different key, fix it in both `fetch_all_sessions` (Python) and `fetchAllSessions` (Node) — same fix, both files.
 - Likewise, the `ReserveSessions` response's success/failure field names (`succeeded`/`failed` in this code) are a guess — AWS's docs describe the per-session success/failure behavior in prose but don't give a JSON schema. Both scripts print and save the raw response regardless, so this only affects the succeeded/failed *count* summary line; fix it in both files once the real keys are confirmed against a live response.
+- Same for the per-session field names the `--md` renderer reads (`abbreviation`/`code`/`sessionType`/`tracks`/`topics`/`startDateTime`/`endDateTime`/`room`/`venue`/`speakers`) — AWS's docs describe what a session *contains* in prose (title, abstract, code, type/level, taxonomy lists including tracks and topics, start/end/room/venue, speaker names) without giving exact JSON keys, and don't mention an `abbreviation` field at all. The renderer is defensive (`_first`/`first` try multiple candidate keys, missing fields are silently omitted), so wrong guesses degrade gracefully rather than crashing — but fix the candidate key lists in both `session_to_markdown` (Python) and `sessionToMarkdown` (Node), and the filename fallback in `save_sessions_as_markdown` / `saveSessionsAsMarkdown`, once real field names are confirmed.
