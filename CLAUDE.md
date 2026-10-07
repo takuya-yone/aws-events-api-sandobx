@@ -12,19 +12,20 @@ Reference: https://docs.aws.amazon.com/events/latest/devguide/what-is-events-api
 
 ```bash
 # Python (3.x, stdlib only)
-python3 aws_events_signin.py [eventId] [--no-abstracts] [--locale=ja-JP] [--md] [--reserve=id1,id2]
+python3 aws_events_signin.py [eventId] [--no-abstracts] [--locale=ja-JP] [--md] [--reserve=id1,id2] [--favorites]
 
 # Node.js (stdlib only, v18+ recommended)
-node aws_events_signin.js [eventId] [--no-abstracts] [--locale=ja-JP] [--md] [--reserve=id1,id2]
+node aws_events_signin.js [eventId] [--no-abstracts] [--locale=ja-JP] [--md] [--reserve=id1,id2] [--favorites]
 ```
 
 - `eventId` (positional, default `reinvent2026`): target event.
 - `--no-abstracts`: sends `includeAbstracts=false` to shrink the response.
 - `--locale=xx-XX`: sets the `locale` query param.
 - `--md`: listing path only — in addition to the JSON file, renders each session as its own human-readable Markdown file under `sessions-<eventId>-md/`, via `save_sessions_as_markdown` / `saveSessionsAsMarkdown` (which call `session_to_markdown` / `sessionToMarkdown` per session). Filename is `<abbreviation>.md`, falling back to `<sessionId>.md` then `unknown-<index>.md`.
+- `--favorites`: instead of listing the whole catalog, fetches the signed-in user's favorited sessions. Calls `GetSchedule` (`GET /v1/events/{eventId}/schedule`), which returns favorites only as session IDs (`schedule.favorites`), then joins them against the full `ListSessions` result and saves details to `favorites-<eventId>.json`. `--md` also works here, writing to `favorites-<eventId>-md/` (via the `prefix` arg of `save_sessions_as_markdown` / `saveSessionsAsMarkdown`). Mutually exclusive with `--reserve`.
 - `--reserve=id1,id2,...`: instead of listing sessions, calls `ReserveSessions` (`POST /v1/events/{eventId}/reservations`) to reserve 1–10 distinct session IDs. Mutually exclusive with the listing flow (and thus with `--md`) — when set, listing is skipped entirely.
 
-Both scripts require a real browser-based Builder ID sign-in during execution — there is no automated/headless test path. Output is written to `sessions-<eventId>.json` (+ optional `sessions-<eventId>-md/` directory) for listing, or `reservation-<eventId>.json` for `--reserve`, in the current directory.
+Both scripts require a real browser-based Builder ID sign-in during execution — there is no automated/headless test path. Output is written to `sessions-<eventId>.json` (+ optional `sessions-<eventId>-md/` directory) for listing, `favorites-<eventId>.json` for `--favorites`, or `reservation-<eventId>.json` for `--reserve`, in the current directory.
 
 ## Architecture (same shape in both languages)
 

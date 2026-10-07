@@ -28,8 +28,11 @@
  *   --reserve=id1,id2,...
  *                   : セッション一覧取得の代わりに、指定したセッションID（1〜10件、重複不可）を
  *                     予約する（ReserveSessions: POST /v1/events/{eventId}/reservations）
- *   --md            : セッション一覧取得時、JSONに加えて sessions-<eventId>-md/ 配下に
- *                     セッションIDごとの Markdown ファイル（<sessionId>.md）も保存する
+ *   --favorites     : セッション一覧取得の代わりに、お気に入り登録したセッションの詳細を取得する
+ *                     （GetSchedule: GET /v1/events/{eventId}/schedule でお気に入りのIDを取得し、
+ *                     ListSessions の結果と突き合わせて favorites-<eventId>.json に保存。--reserve と併用不可）
+ *   --md            : セッション一覧/お気に入り取得時、JSONに加えて Markdown ファイル
+ *                     （一覧: sessions-<eventId>-md/、お気に入り: favorites-<eventId>-md/）も保存する
  */
 
 const http = require('http');
@@ -68,6 +71,12 @@ if (RESERVE_SESSION_IDS) {
   }
 }
 const MD_OUTPUT = cliArgs.includes('--md');
+const FAVORITES_MODE = cliArgs.includes('--favorites');
+
+if (FAVORITES_MODE && RESERVE_SESSION_IDS) {
+  console.error('エラー: --favorites と --reserve は同時に指定できません。');
+  process.exit(1);
+}
 
 // ---- PKCE生成 ----
 function base64url(buf) {
@@ -210,6 +219,24 @@ async function reserveSessions(eventId, accessToken, sessionIds) {
   return body;
 }
 
+// ---- GetSchedule: 自分のスケジュール（予約・お気に入り・パーソナルタイム）を取得 ----
+// お気に入りは sessionId の配列（schedule.favorites）でのみ返る。詳細は別途取得が必要。
+async function getSchedule(eventId, accessToken) {
+  const urlObj = new URL(`${API_BASE}/events/${encodeURIComponent(eventId)}/schedule`);
+  const { body } = await getJson(urlObj, accessToken);
+  return body.schedule || {};
+}
+
+// ---- GetSession: 1件取得 ----
+async function getSession(eventId, accessToken, sessionId, locale) {
+  const urlObj = new URL(
+    `${API_BASE}/events/${encodeURIComponent(eventId)}/sessions/${encodeURIComponent(sessionId)}`
+  );
+  if (locale) urlObj.searchParams.set('locale', locale);
+  const { body } = await getJson(urlObj, accessToken);
+  return body.session || {};
+}
+
 // ---- ListSessions: nextTokenが無くなるまで全ページ取得 ----
 // 注意: ページが短くても最後とは限らない。nextTokenが無いことだけが終了条件。
 async function fetchAllSessions(eventId, accessToken, { includeAbstracts = true, locale } = {}) {
@@ -296,8 +323,8 @@ function sessionToMarkdown(session) {
 
 const UNSAFE_FILENAME_CHARS = /[^A-Za-z0-9_.-]/g;
 
-function saveSessionsAsMarkdown(eventId, sessions) {
-  const mdDir = `sessions-${eventId}-md`;
+function saveSessionsAsMarkdown(eventId, sessions, prefix = 'sessions') {
+  const mdDir = `${prefix}-${eventId}-md`;
   fs.mkdirSync(mdDir, { recursive: true });
   sessions.forEach((s, i) => {
     // ファイル名は abbreviation を優先。無ければ sessionId、それも無ければ連番。
@@ -379,6 +406,85 @@ const server = http.createServer(async (req, res) => {
           );
         } else {
           console.error('予約に失敗しました:', e.message);
+        }
+      }
+      return;
+    }
+
+    if (FAVORITES_MODE) {
+      console.log(`\n=== ${EVENT_ID} のお気に入りセッションを取得中 ===`);
+      try {
+        const favoriteIds = (await getSchedule(EVENT_ID, tokens.access_token)).favorites || [];
+        console.log(`お気に入り: ${favoriteIds.length}件`);
+
+        const outFile = `favorites-${EVENT_ID}.json`;
+        if (!favoriteIds.length) {
+          fs.writeFileSync(outFile, '[]', 'utf-8');
+          console.log(`保存先: ${outFile}`);
+          return;
+        }
+
+        // GetSchedule はIDしか返さないため、カタログ全件から突き合わせる
+        const { sessions } = await fetchAllSessions(EVENT_ID, tokens.access_token, {
+          includeAbstracts: INCLUDE_ABSTRACTS,
+          locale: LOCALE,
+        });
+        // sessionId で突き合わせ、合わなければ abbreviation（例: AIM3315）でも試す
+        const byId = new Map(sessions.map((s) => [s.sessionId, s]));
+        const byAbbr = new Map(sessions.filter((s) => s.abbreviation).map((s) => [s.abbreviation, s]));
+        const favorites = [];
+        let missing = [];
+        for (const i of favoriteIds) {
+          const match = byId.get(i) || byAbbr.get(i);
+          if (match) favorites.push(match);
+          else missing.push(i);
+        }
+        const cacheFile = `sessions-${EVENT_ID}.json`;
+        if (missing.length && fs.existsSync(cacheFile)) {
+          // ライブのカタログに無い分は、以前保存した sessions-<eventId>.json があればそこから補う
+          const cached = new Map(JSON.parse(fs.readFileSync(cacheFile, 'utf-8')).map((s) => [s.sessionId, s]));
+          const hit = missing.filter((i) => cached.has(i));
+          hit.forEach((i) => favorites.push(cached.get(i)));
+          missing = missing.filter((i) => !cached.has(i));
+          if (hit.length) {
+            console.error(`警告: ${hit.length}件はAPIから取得できず、保存済みの ${cacheFile} から補いました（内容が古い可能性があります）`);
+          }
+        }
+        if (missing.length) {
+          // それでも無い分は GetSession で1件ずつ取得
+          console.log(`カタログに無い${missing.length}件を GetSession で取得します`);
+          const stillMissing = [];
+          for (const i of missing) {
+            try {
+              favorites.push(await getSession(EVENT_ID, tokens.access_token, i, LOCALE));
+            } catch (e) {
+              stillMissing.push(`${i}(${e.status ?? e.message})`);
+            }
+          }
+          if (stillMissing.length) console.error(`警告: 取得できなかったお気に入りID: ${stillMissing.join(', ')}`);
+        }
+
+        fs.writeFileSync(outFile, JSON.stringify(favorites, null, 2), 'utf-8');
+        console.log(`保存先: ${outFile}（${favorites.length}件）`);
+
+        if (MD_OUTPUT) {
+          const mdDir = saveSessionsAsMarkdown(EVENT_ID, favorites, 'favorites');
+          console.log(`保存先(Markdown): ${mdDir}/ 配下に${favorites.length}件`);
+        }
+
+        console.log('\n--- お気に入り一覧 ---');
+        favorites.forEach((s) => {
+          console.log(`- [${s.sessionId ?? '?'}] ${s.title ?? '(タイトルなし)'}`);
+        });
+      } catch (e) {
+        if (e.status === 401) {
+          console.error('お気に入り取得に失敗（401）: トークンが無効です。');
+        } else if (e.status === 403) {
+          console.error(
+            `お気に入り取得に失敗（403）: このイベント（${EVENT_ID}）に登録されていない可能性があります。イベントの登録サイトで登録してから再実行してください。`
+          );
+        } else {
+          console.error('お気に入り取得に失敗しました:', e.message);
         }
       }
       return;

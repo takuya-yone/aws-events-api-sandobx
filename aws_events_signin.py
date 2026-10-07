@@ -21,8 +21,11 @@ AWS Events API - Builder ID サインイン (Authorization Code + PKCE)
     --reserve=id1,id2,...
                     : セッション一覧取得の代わりに、指定したセッションID（1〜10件、重複不可）を
                       予約する（ReserveSessions: POST /v1/events/{eventId}/reservations）
-    --md            : セッション一覧取得時、JSONに加えて sessions-<eventId>-md/ 配下に
-                      セッションIDごとの Markdown ファイル（<sessionId>.md）も保存する
+    --favorites     : セッション一覧取得の代わりに、お気に入り登録したセッションの詳細を取得する
+                      （GetSchedule: GET /v1/events/{eventId}/schedule でお気に入りのIDを取得し、
+                      ListSessions の結果と突き合わせて favorites-<eventId>.json に保存。--reserve と併用不可）
+    --md            : セッション一覧/お気に入り取得時、JSONに加えて Markdown ファイル
+                      （一覧: sessions-<eventId>-md/、お気に入り: favorites-<eventId>-md/）も保存する
 """
 
 import base64
@@ -57,6 +60,11 @@ RESERVE_SESSION_IDS = (
     [s for s in _reserve_arg.split("=", 1)[1].split(",") if s] if _reserve_arg else None
 )
 MD_OUTPUT = "--md" in _cli_args
+FAVORITES_MODE = "--favorites" in _cli_args
+
+if FAVORITES_MODE and RESERVE_SESSION_IDS is not None:
+    print("エラー: --favorites と --reserve は同時に指定できません。", file=sys.stderr)
+    sys.exit(1)
 
 if RESERVE_SESSION_IDS is not None:
     if not (1 <= len(RESERVE_SESSION_IDS) <= 10):
@@ -159,6 +167,24 @@ def post_json(url: str, access_token: str, payload: dict) -> dict:
 def reserve_sessions(event_id: str, access_token: str, session_ids: list) -> dict:
     url = f"{API_BASE}/events/{urllib.parse.quote(event_id, safe='')}/reservations"
     return post_json(url, access_token, {"sessionIds": session_ids})
+
+
+# ---- GetSchedule: 自分のスケジュール（予約・お気に入り・パーソナルタイム）を取得 ----
+# お気に入りは sessionId の配列（schedule.favorites）でのみ返る。詳細は別途取得が必要。
+def get_schedule(event_id: str, access_token: str) -> dict:
+    url = f"{API_BASE}/events/{urllib.parse.quote(event_id, safe='')}/schedule"
+    return get_json(url, access_token).get("schedule") or {}
+
+
+# ---- GetSession: 1件取得 ----
+def get_session(event_id: str, access_token: str, session_id: str, locale: str = None) -> dict:
+    url = (
+        f"{API_BASE}/events/{urllib.parse.quote(event_id, safe='')}"
+        f"/sessions/{urllib.parse.quote(session_id, safe='')}"
+    )
+    if locale:
+        url += "?" + urllib.parse.urlencode({"locale": locale})
+    return get_json(url, access_token).get("session") or {}
 
 
 # ---- ListSessions: nextTokenが無くなるまで全ページ取得 ----
@@ -273,8 +299,8 @@ def session_to_markdown(session: dict) -> str:
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
 
 
-def save_sessions_as_markdown(event_id: str, sessions: list) -> str:
-    md_dir = f"sessions-{event_id}-md"
+def save_sessions_as_markdown(event_id: str, sessions: list, prefix: str = "sessions") -> str:
+    md_dir = f"{prefix}-{event_id}-md"
     os.makedirs(md_dir, exist_ok=True)
     for i, s in enumerate(sessions):
         # ファイル名は abbreviation を優先。無ければ sessionId、それも無ければ連番。
@@ -392,6 +418,83 @@ def main():
                 )
             else:
                 print("予約に失敗しました:", e, file=sys.stderr)
+        return
+
+    if FAVORITES_MODE:
+        print(f"\n=== {EVENT_ID} のお気に入りセッションを取得中 ===")
+        try:
+            token = tokens.get("access_token")
+            favorite_ids = get_schedule(EVENT_ID, token).get("favorites") or []
+            print(f"お気に入り: {len(favorite_ids)}件")
+            
+            out_file = f"favorites-{EVENT_ID}.json"
+            if not favorite_ids:
+                with open(out_file, "w", encoding="utf-8") as f:
+                    json.dump([], f)
+                print(f"保存先: {out_file}")
+                return
+
+            # GetSchedule はIDしか返さないため、カタログ全件から突き合わせる
+            sessions, _ = fetch_all_sessions(
+                EVENT_ID, token, include_abstracts=INCLUDE_ABSTRACTS, locale=LOCALE
+            )
+            # sessionId で突き合わせ、合わなければ abbreviation（例: AIM3315）でも試す
+            by_id = {s.get("sessionId"): s for s in sessions}
+            by_abbr = {s["abbreviation"]: s for s in sessions if s.get("abbreviation")}
+            favorites = []
+            missing = []
+            for i in favorite_ids:
+                match = by_id.get(i) or by_abbr.get(i)
+                if match:
+                    favorites.append(match)
+                else:
+                    missing.append(i)
+            if missing:
+                # ライブのカタログに無い分は、以前保存した sessions-<eventId>.json があればそこから補う
+                cache_file = f"sessions-{EVENT_ID}.json"
+                if os.path.exists(cache_file):
+                    with open(cache_file, encoding="utf-8") as f:
+                        cached = {s.get("sessionId"): s for s in json.load(f)}
+                    hit = [i for i in missing if i in cached]
+                    favorites.extend(cached[i] for i in hit)
+                    missing = [i for i in missing if i not in cached]
+                    if hit:
+                        print(f"警告: {len(hit)}件はAPIから取得できず、保存済みの {cache_file} から補いました（内容が古い可能性があります）", file=sys.stderr)
+            if missing:
+                # それでも無い分は GetSession で1件ずつ取得
+                print(f"カタログに無い{len(missing)}件を GetSession で取得します")
+                still_missing = []
+                for i in missing:
+                    try:
+                        favorites.append(get_session(EVENT_ID, token, i, locale=LOCALE))
+                    except ApiError as e:
+                        still_missing.append(f"{i}({e.status})")
+                if still_missing:
+                    print(f"警告: 取得できなかったお気に入りID: {', '.join(still_missing)}", file=sys.stderr)
+
+            with open(out_file, "w", encoding="utf-8") as f:
+                json.dump(favorites, f, ensure_ascii=False, indent=2)
+            print(f"保存先: {out_file}（{len(favorites)}件）")
+
+            if MD_OUTPUT:
+                md_dir = save_sessions_as_markdown(EVENT_ID, favorites, prefix="favorites")
+                print(f"保存先(Markdown): {md_dir}/ 配下に{len(favorites)}件")
+
+            print("\n--- お気に入り一覧 ---")
+            for s in favorites:
+                print(f"- [{s.get('sessionId', '?')}] {s.get('title', '(タイトルなし)')}")
+
+        except ApiError as e:
+            if e.status == 401:
+                print("お気に入り取得に失敗（401）: トークンが無効です。", file=sys.stderr)
+            elif e.status == 403:
+                print(
+                    f"お気に入り取得に失敗（403）: このイベント（{EVENT_ID}）に登録されていない可能性があります。"
+                    "イベントの登録サイトで登録してから再実行してください。",
+                    file=sys.stderr,
+                )
+            else:
+                print("お気に入り取得に失敗しました:", e, file=sys.stderr)
         return
 
     print(f"\n=== {EVENT_ID} のセッション一覧を取得中 ===")
