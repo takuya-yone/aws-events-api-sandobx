@@ -27,6 +27,14 @@ Ref. https://docs.aws.amazon.com/events/latest/devguide/what-is-events-api.html
 各ファイルには略称・タイトル・コード・トラック・トピック・サービス・セッション時間
 (`sessionTime`。無ければ開始/終了時刻)・場所・スピーカー・abstractを整形して出力します。
 
+`--favorites` を指定した場合は、6〜7の代わりに
+`GET /v1/events/{eventId}/schedule`
+([GetSchedule](https://docs.aws.amazon.com/events/latest/devguide/rest-op-getschedule.html))
+で自分のお気に入りのセッションID(`schedule.favorites`)を取得し、ListSessions の
+全件結果と突き合わせて詳細付きで `favorites-<eventId>.json` に保存します
+(`--md` 併用時は `favorites-<eventId>-md/` にも出力)。GetSchedule はIDしか返さないため
+この方式にしています。カタログに見つからないIDは警告表示されます。
+
 `--reserve=id1,id2,...` を指定した場合は、6〜7の代わりに
 `POST /v1/events/{eventId}/reservations`
 ([ReserveSessions](https://docs.aws.amazon.com/events/latest/devguide/rest-op-reservesessions.html))
@@ -43,7 +51,8 @@ Ref. https://docs.aws.amazon.com/events/latest/devguide/what-is-events-api.html
 | `eventId`(第1引数) | 対象イベントID。省略時は `reinvent2026` |
 | `--no-abstracts` | `includeAbstracts=false` を指定し、abstractフィールドを省略して軽量化 |
 | `--locale=xx-XX` | `locale` クエリパラメータを指定(例: `--locale=ja-JP`) |
-| `--md` | セッション一覧取得時、JSONに加えて `sessions-<eventId>-md/` にセッションIDごとのMarkdownも保存 |
+| `--md` | セッション一覧/お気に入り取得時、JSONに加えて `sessions-<eventId>-md/`(お気に入りは `favorites-<eventId>-md/`)にセッションごとのMarkdownも保存 |
+| `--favorites` | セッション一覧取得の代わりに、お気に入り登録したセッションの詳細を取得(`--reserve` と併用不可) |
 | `--reserve=id1,id2,...` | セッション一覧取得の代わりに、指定したセッションID(1〜10件、重複不可)を予約 |
 
 ### エラー時の挙動
